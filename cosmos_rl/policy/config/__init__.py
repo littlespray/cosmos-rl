@@ -991,6 +991,33 @@ class DiffusersConfig(BaseModel):
     tokenizer: TokenizerConfig = Field(default_factory=TokenizerConfig)
 
 
+class EnscaleConfig(BaseModel):
+    enable: bool = Field(
+        default=False,
+        description="Enable enscale cross-attention for Qwen3-VL LLM layers.",
+    )
+    dim: Optional[int] = Field(
+        default=None,
+        description="Hidden size for enscale cross-attention. Defaults to model hidden size if None.",
+    )
+    layers: List[int] = Field(
+        default_factory=lambda: [0, -1],
+        description="LLM layer indices to apply enscale (supports negative indices).",
+    )
+    dino_model_name: str = Field(
+        default="facebook/dinov3-vits16-pretrain-lvd1689m",
+        description="DINO model name for image feature extraction.",
+    )
+    dino_feature_layers: List[int] = Field(
+        default_factory=lambda: [6, 11],
+        description="Two DINO layer indices used for multi-level features.",
+    )
+    num_heads: int = Field(
+        default=8,
+        description="Number of attention heads for enscale cross-attention.",
+    )
+
+
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
 
@@ -1019,6 +1046,7 @@ class PolicyConfig(BaseModel):
     model_gradient_checkpointing: bool = Field(
         default=True, description="Whether to use gradient checkpointing"
     )
+    enscale: EnscaleConfig = Field(default_factory=EnscaleConfig)
 
     lora: LoraConfig | None = Field(default=None, description="LoRA configuration")
     trainable_map: Optional[Dict[str, bool]] = Field(

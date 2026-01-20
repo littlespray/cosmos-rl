@@ -68,6 +68,10 @@ class Qwen3_VL_DataPacker(DataPacker):
 
     def setup(self, config: Config, *args, **kwargs):
         super().setup(config, *args, **kwargs)
+        self.enscale_enabled = (
+            hasattr(config.policy, "enscale")
+            and getattr(config.policy.enscale, "enable", False)
+        )
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -518,6 +522,17 @@ class Qwen3_VL_DataPacker(DataPacker):
                 **kwarg,
                 **video_kwargs,
             )
+
+            if self.enscale_enabled:
+                if len(video_inputs) > 0:
+                    raise ValueError(
+                        "enscale does not support video inputs; please use image inputs."
+                    )
+                if len(image_inputs) != 1:
+                    raise ValueError(
+                        "enscale expects exactly one image per sample; "
+                        f"got {len(image_inputs)} images."
+                    )
             input_ids = inputs["input_ids"][0].tolist()
             label_ids = [IGNORE_LABEL_ID] * len(input_ids)
 
@@ -561,6 +576,10 @@ class Qwen3_VL_DataPacker(DataPacker):
                 result_dict["image_grid_thw"] = inputs["image_grid_thw"]
             else:
                 result_dict["image_grid_thw"] = None
+            if self.enscale_enabled:
+                result_dict["enscale_images"] = image_inputs[0]
+        elif self.enscale_enabled:
+            raise ValueError("enscale enabled but no image inputs found in sample.")
 
         # position_ids: (3, 1, seq_len)
         # Only for Qwen3VLMOE
@@ -623,6 +642,8 @@ class Qwen3_VL_DataPacker(DataPacker):
         # second_per_grid_ts: (BATCH_SIZE, 1)
         # pixel_values_[videos/images]_lengths_per_sample: (BATCH_SIZE, 1)
         batch = {}
+        if "enscale_images" in processed_samples[0]:
+            batch["enscale_images"] = [x["enscale_images"] for x in processed_samples]
         if pixel_values_videos is not None:
             batch["pixel_values_videos"] = pixel_values_videos
 
@@ -704,6 +725,8 @@ class Qwen3_VL_DataPacker(DataPacker):
         return_dict = {
             "position_ids": x["position_ids"],
         }
+        if "enscale_images" in x:
+            return_dict["enscale_images"] = x["enscale_images"]
         if "pixel_values_videos" in x:
             return_dict["pixel_values_videos"] = x["pixel_values_videos"]
         else:

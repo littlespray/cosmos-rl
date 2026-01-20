@@ -50,6 +50,7 @@ from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoeArgs,
     build_norm as qwen3_moe_build_norm,
 )
+from cosmos_rl.policy.model.enscale import Enscale
 
 from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoe_Encoder_Args,
@@ -154,10 +155,48 @@ class Qwen3MoE(nn.Module):
             dim=model_args.dim,
             moe_inter_dim=model_args.ffn_dim,
         )
+        enscale_cfg = getattr(model_args.hf_config, "enscale", None)
+        self.enscale = None
+        self.enscale_layers = set()
+        if isinstance(enscale_cfg, dict) and enscale_cfg.get("enable", False):
+            enscale_dim = enscale_cfg.get("dim") or model_args.dim
+            dino_model_name = enscale_cfg.get(
+                "dino_model_name", "facebook/dinov3-vits16-pretrain-lvd1689m"
+            )
+            dino_feature_layers = enscale_cfg.get("dino_feature_layers", [6, 11])
+            num_heads = enscale_cfg.get("num_heads", 8)
+            layer_list = enscale_cfg.get("layers", [0, -1])
+            normalized_layers = []
+            for idx in layer_list:
+                normalized = idx + model_args.n_layers if idx < 0 else idx
+                if 0 <= normalized < model_args.n_layers:
+                    normalized_layers.append(normalized)
+            self.enscale_layers = set(normalized_layers)
+            if len(self.enscale_layers) > 0:
+                self.enscale = Enscale(
+                    model_dim=model_args.dim,
+                    enscale_dim=enscale_dim,
+                    dino_model_name=dino_model_name,
+                    dino_feature_layers=dino_feature_layers,
+                    num_heads=num_heads,
+                )
+                logger.info(
+                    "Enscale enabled: dim=%s layers=%s dino=%s dino_layers=%s heads=%s",
+                    enscale_dim,
+                    sorted(self.enscale_layers),
+                    dino_model_name,
+                    dino_feature_layers,
+                    num_heads,
+                )
+
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = Qwen3MoEBlock(
-                layer_id, model_args, self.moe_args
+                layer_id,
+                model_args,
+                self.moe_args,
+                enscale_module=self.enscale,
+                enscale_layers=self.enscale_layers,
             )
 
         self.norm = qwen3_moe_build_norm(
@@ -614,12 +653,14 @@ class Qwen3VLMoeModel(BaseModel):
             inputs_embeds = input_ids
         # For GRPO, we can pass in the logprob_masks to the model
         # to avoid computing the logits which are not needed for the model
+        enscale_images = kwargs.pop("enscale_images", None)
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids.permute(1, 0, 2).contiguous(),
             interested_tokens=kwargs.pop("interested_tokens", None),
             visual_pos_masks=visual_pos_masks,
             deepstack_visual_embeds=deepstack_visual_embeds,
+            enscale_images=enscale_images,
             **kwargs,  # Additional arguments for compatibility
         )
         return outputs
@@ -1006,6 +1047,19 @@ class Qwen3VLMoeModel(BaseModel):
             hf_config=hf_config,
         )
         return cls.from_model_args(args)
+
+    @classmethod
+    def preprocess_hf_config(cls, cosmos_config: CosmosConfig):
+        hf_config = AutoConfig.from_pretrained(
+            cosmos_config.policy.model_name_or_path, trust_remote_code=True
+        )
+        enscale_cfg = getattr(cosmos_config.policy, "enscale", None)
+        if enscale_cfg is not None:
+            enscale_dict = enscale_cfg.model_dump()
+            setattr(hf_config, "enscale", enscale_dict)
+            if hasattr(hf_config, "text_config"):
+                setattr(hf_config.text_config, "enscale", enscale_dict)
+        return hf_config
 
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         n_params = 0

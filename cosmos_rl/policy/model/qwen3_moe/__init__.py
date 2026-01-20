@@ -320,7 +320,14 @@ class Qwen3MoEBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: Qwen3MoeArgs, moe_args: MoEArgs):
+    def __init__(
+        self,
+        layer_id: int,
+        model_args: Qwen3MoeArgs,
+        moe_args: MoEArgs,
+        enscale_module: Optional[nn.Module] = None,
+        enscale_layers: Optional[set[int]] = None,
+    ):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
@@ -343,6 +350,12 @@ class Qwen3MoEBlock(nn.Module):
             casting_mode=model_args.hf_config.model_type,
         )
         self.moe_args = moe_args
+        self.enscale = enscale_module
+        self.enscale_enabled = (
+            enscale_module is not None
+            and enscale_layers is not None
+            and layer_id in enscale_layers
+        )
 
     def forward(
         self,
@@ -364,6 +377,14 @@ class Qwen3MoEBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+        if self.enscale_enabled:
+            enscale_images = kwargs.get("enscale_images", None)
+            if enscale_images is None:
+                raise ValueError(
+                    "enscale is enabled but enscale_images is missing from inputs."
+                )
+            x = x + self.enscale(x, enscale_images)
+
         h = x + self.self_attn(
             self.input_layernorm(x),
             position_embeddings,
