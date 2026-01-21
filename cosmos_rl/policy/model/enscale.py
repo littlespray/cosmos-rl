@@ -76,7 +76,8 @@ class EnscaleHead(nn.Module):
             nn.Linear(enscale_dim * ffn_multiplier, model_dim),
         )
         # Learnable gate (init=0) for stability: start as no-op, learn contribution.
-        self.gate = nn.Parameter(torch.zeros(()))
+        # Note: FSDP fully_shard does not support 0-dim scalar params, so use (1,).
+        self.gate = nn.Parameter(torch.zeros(1))
 
     def forward(
         self, hidden_states: torch.Tensor, feat_1: torch.Tensor, feat_2: torch.Tensor
