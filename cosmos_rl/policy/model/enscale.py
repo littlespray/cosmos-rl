@@ -18,7 +18,9 @@ from __future__ import annotations
 from typing import Iterable, Tuple, Any
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
+from transformers.image_utils import load_image
 from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 
 
@@ -36,7 +38,21 @@ class EnscaleEncoder(nn.Module):
 
     @torch.no_grad()
     def extract(self, images: Any) -> list[torch.Tensor]:
-        inputs = self.processor(images=images, return_tensors="pt").to(self.encoder.device)
+        # Normalize inputs to a list
+        if isinstance(images, (list, tuple)):
+            img_list = list(images)
+        else:
+            img_list = [images]
+
+        norm_list = []
+        for img in img_list:
+            if not isinstance(img, Image.Image):
+                img = load_image(img)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            norm_list.append(img)
+
+        inputs = self.processor(images=norm_list, return_tensors="pt").to(self.encoder.device)
         hidden_states = self.encoder(**inputs).hidden_states
         return [hidden_states[i] for i in self.scale_idx]
 
