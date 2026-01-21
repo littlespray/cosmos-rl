@@ -19,6 +19,7 @@ from typing import Iterable, Tuple, Any
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoImageProcessor, AutoModel
+from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 
 
 class EnscaleDinoEncoder(nn.Module):
@@ -66,10 +67,16 @@ class EnscaleHead(nn.Module):
         self.q_norm = nn.LayerNorm(model_dim, eps=1e-6)
         self.feature_proj_1 = nn.Linear(dino_hidden_dim, enscale_dim, bias=False)
         self.feature_proj_2 = nn.Linear(dino_hidden_dim, enscale_dim, bias=False)
-        self.query_proj = nn.Linear(model_dim, enscale_dim, bias=False)
-        self.cross_attn = nn.MultiheadAttention(
-            enscale_dim, num_heads=num_heads, batch_first=True
+        self.q_proj = nn.Linear(model_dim, enscale_dim, bias=False)
+        self.k_proj = nn.Linear(enscale_dim, enscale_dim, bias=False)
+        self.v_proj = nn.Linear(enscale_dim, enscale_dim, bias=False)
+        self.o_proj = nn.Linear(enscale_dim, enscale_dim, bias=False)
+        assert enscale_dim % num_heads == 0, (
+            f"enscale_dim ({enscale_dim}) must be divisible by num_heads ({num_heads})"
         )
+        self.num_heads = num_heads
+        self.head_dim = enscale_dim // num_heads
+        self.attn_func = FlashAttnMeta().flash_attn_func
         self.ffn = nn.Sequential(
             nn.Linear(enscale_dim, enscale_dim * ffn_multiplier),
             nn.GELU(),
@@ -82,11 +89,39 @@ class EnscaleHead(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, feat_1: torch.Tensor, feat_2: torch.Tensor
     ) -> torch.Tensor:
+        # Handle DTensor: work on local tensor to avoid TP layout issues
+        is_dtensor = hasattr(hidden_states, "device_mesh")
+        if is_dtensor:
+            _device_mesh = hidden_states.device_mesh
+            _placements = hidden_states.placements
+            hidden_states = hidden_states.to_local()
+
         feat_1 = feat_1.to(device=hidden_states.device, dtype=hidden_states.dtype)
         feat_2 = feat_2.to(device=hidden_states.device, dtype=hidden_states.dtype)
         kv = torch.cat(
             [self.feature_proj_1(feat_1), self.feature_proj_2(feat_2)], dim=1
         )
-        query = self.query_proj(self.q_norm(hidden_states))
-        attn_out, _ = self.cross_attn(query, kv, kv, need_weights=False)
-        return self.gate * self.ffn(attn_out)
+        xq = self.q_proj(self.q_norm(hidden_states))
+        xk = self.k_proj(kv)
+        xv = self.v_proj(kv)
+
+        b, qlen, _ = xq.shape
+        klen = xk.shape[1]
+        xq = xq.view(b, qlen, self.num_heads, self.head_dim)
+        xk = xk.view(b, klen, self.num_heads, self.head_dim)
+        xv = xv.view(b, klen, self.num_heads, self.head_dim)
+
+        input_dtype = xq.dtype
+        if input_dtype == torch.float32:
+            xq = xq.to(torch.bfloat16)
+            xk = xk.to(torch.bfloat16)
+            xv = xv.to(torch.bfloat16)
+
+        attn_out = self.attn_func(xq, xk, xv, causal=False).reshape(b, qlen, -1)
+        attn_out = self.o_proj(attn_out.to(input_dtype))
+        out = self.gate * self.ffn(attn_out)
+
+        # Wrap back to DTensor with same placement
+        if is_dtensor:
+            out = torch.distributed.tensor.DTensor.from_local(out, _device_mesh, _placements)
+        return out

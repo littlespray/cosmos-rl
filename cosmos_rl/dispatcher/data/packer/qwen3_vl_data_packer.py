@@ -532,7 +532,7 @@ class Qwen3_VL_DataPacker(DataPacker):
                     raise ValueError(
                         "enscale expects exactly one image per sample; "
                         f"got {len(image_inputs)} images."
-                    )
+            )
             input_ids = inputs["input_ids"][0].tolist()
             label_ids = [IGNORE_LABEL_ID] * len(input_ids)
 

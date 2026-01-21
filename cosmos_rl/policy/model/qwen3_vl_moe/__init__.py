@@ -1091,7 +1091,12 @@ class Qwen3VLMoeModel(BaseModel):
         visual = [
             "visual",
         ]  # Filter Linear in visual out, they will corrupt the FP8/FP4 Linear.
-        return llm + visual
+        # Exclude enscale modules: DINO encoder is frozen and enscale heads are small;
+        # quantizing them may hurt quality without meaningful speedup.
+        enscale = [
+            "enscale",
+        ]
+        return llm + visual + enscale
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         visual_n_heads = self.config.encoder_args.n_heads
