@@ -44,8 +44,9 @@ class Enscale(nn.Module):
 
         with torch.device("cpu"):
             dino_config = AutoConfig.from_pretrained(dino_model_name)
+            dino_config.output_hidden_states = True
             self.dino = AutoModel.from_pretrained(
-                dino_model_name, config=dino_config, output_hidden_states=True
+                dino_model_name, config=dino_config
             )
             self.processor = AutoImageProcessor.from_pretrained(dino_model_name)
 

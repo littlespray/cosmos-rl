@@ -53,7 +53,7 @@ save_mode = "async"
 
 [policy.parallelism]
 n_init_replicas = 1
-tp_size = 1
+tp_size = 4
 cp_size = 1
 dp_shard_size = 8
 pp_size = 1
@@ -63,6 +63,6 @@ dp_replicate_size = 1
 enable = true
 dim = 1024
 layers = [0, -1]
-dino_model_name = "facebook/dinov3-vits16-pretrain-lvd1689m"
+dino_model_name = "facebook/dinov2-large"
 dino_feature_layers = [6, 11]
 num_heads = 8
