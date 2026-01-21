@@ -63,6 +63,7 @@ class EnscaleHead(nn.Module):
         ffn_multiplier: int = 4,
     ) -> None:
         super().__init__()
+        self.q_norm = nn.LayerNorm(model_dim, eps=1e-6)
         self.feature_proj_1 = nn.Linear(dino_hidden_dim, enscale_dim, bias=False)
         self.feature_proj_2 = nn.Linear(dino_hidden_dim, enscale_dim, bias=False)
         self.query_proj = nn.Linear(model_dim, enscale_dim, bias=False)
@@ -74,6 +75,8 @@ class EnscaleHead(nn.Module):
             nn.GELU(),
             nn.Linear(enscale_dim * ffn_multiplier, model_dim),
         )
+        # Learnable gate (init=0) for stability: start as no-op, learn contribution.
+        self.gate = nn.Parameter(torch.zeros(()))
 
     def forward(
         self, hidden_states: torch.Tensor, feat_1: torch.Tensor, feat_2: torch.Tensor
@@ -83,6 +86,6 @@ class EnscaleHead(nn.Module):
         kv = torch.cat(
             [self.feature_proj_1(feat_1), self.feature_proj_2(feat_2)], dim=1
         )
-        query = self.query_proj(hidden_states)
+        query = self.query_proj(self.q_norm(hidden_states))
         attn_out, _ = self.cross_attn(query, kv, kv, need_weights=False)
-        return self.ffn(attn_out)
+        return self.gate * self.ffn(attn_out)
