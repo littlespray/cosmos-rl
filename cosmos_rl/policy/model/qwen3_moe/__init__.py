@@ -378,12 +378,8 @@ class Qwen3MoEBlock(nn.Module):
 
         """
         if self.enscale_enabled:
-            enscale_images = kwargs.get("enscale_images", None)
-            if enscale_images is None:
-                raise ValueError(
-                    "enscale is enabled but enscale_images is missing from inputs."
-                )
-            x = x + self.enscale(x, enscale_images)
+            feat_1, feat_2 = kwargs["enscale_features"]
+            x = x + self.enscale(x, feat_1, feat_2)
 
         h = x + self.self_attn(
             self.input_layernorm(x),

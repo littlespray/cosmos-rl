@@ -50,7 +50,7 @@ from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoeArgs,
     build_norm as qwen3_moe_build_norm,
 )
-from cosmos_rl.policy.model.enscale import Enscale
+from cosmos_rl.policy.model.enscale import EnscaleDinoEncoder, EnscaleHead
 
 from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoe_Encoder_Args,
@@ -156,7 +156,7 @@ class Qwen3MoE(nn.Module):
             moe_inter_dim=model_args.ffn_dim,
         )
         enscale_cfg = getattr(model_args.hf_config, "enscale", None)
-        self.enscale = None
+        self.enscale_encoder = None
         self.enscale_layers = set()
         if isinstance(enscale_cfg, dict) and enscale_cfg.get("enable", False):
             enscale_dim = enscale_cfg.get("dim") or model_args.dim
@@ -173,12 +173,8 @@ class Qwen3MoE(nn.Module):
                     normalized_layers.append(normalized)
             self.enscale_layers = set(normalized_layers)
             if len(self.enscale_layers) > 0:
-                self.enscale = Enscale(
-                    model_dim=model_args.dim,
-                    enscale_dim=enscale_dim,
-                    dino_model_name=dino_model_name,
-                    dino_feature_layers=dino_feature_layers,
-                    num_heads=num_heads,
+                self.enscale_encoder = EnscaleDinoEncoder(
+                    dino_model_name=dino_model_name, dino_feature_layers=dino_feature_layers
                 )
                 logger.info(
                     "Enscale enabled: dim=%s layers=%s dino=%s dino_layers=%s heads=%s",
@@ -191,11 +187,20 @@ class Qwen3MoE(nn.Module):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
+            head = None
+            if self.enscale_encoder is not None and layer_id in self.enscale_layers:
+                dino_hidden_dim = self.enscale_encoder.dino.config.hidden_size
+                head = EnscaleHead(
+                    model_dim=model_args.dim,
+                    enscale_dim=enscale_dim,
+                    dino_hidden_dim=dino_hidden_dim,
+                    num_heads=num_heads,
+                )
             self.layers[str(layer_id)] = Qwen3MoEBlock(
                 layer_id,
                 model_args,
                 self.moe_args,
-                enscale_module=self.enscale,
+                enscale_module=head,
                 enscale_layers=self.enscale_layers,
             )
 
@@ -231,6 +236,12 @@ class Qwen3MoE(nn.Module):
         h = self.identity_layer(inputs_embeds)
 
         position_embeddings = self.rotary_emb(h, position_ids)
+
+        if self.enscale_encoder is not None and len(self.enscale_layers) > 0:
+            images = kwargs["enscale_images"]
+            feat_1, feat_2 = self.enscale_encoder.extract(images)
+            kwargs["enscale_features"] = (feat_1, feat_2)
+            del kwargs["enscale_images"]
 
         cp_mesh = kwargs.get("cp_mesh", None)
 
