@@ -414,6 +414,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
             Note: Here we assume there is no data shuffling across epochs.
             Otherwise, we need to call `set_epoch` on the sampler after each epoch.
             """
+            # If shuffling is enabled, make sure the sampler order is seeded for the
+            # current epoch before computing the skipping bias.
+            if (
+                self.config.train.train_policy.dataloader_shuffle
+                and hasattr(train_sampler, "set_epoch")
+            ):
+                train_sampler.set_epoch(self.start_epoch)
+
             # Resume training from the last checkpoint if needed
             total_steps_per_epoch = len(
                 get_train_data_loader(train_sampler, batch_sampler)
@@ -464,6 +472,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
         self.epoch = self.config.train.epoch
 
+        # Keep a reference so we can call `set_epoch()` when shuffling is enabled.
+        self.train_sampler = train_sampler
         self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
         if val_batch_sampler is not None:
             logger.info(
@@ -623,6 +633,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
+            if (
+                self.config.train.train_policy.dataloader_shuffle
+                and hasattr(self, "train_sampler")
+                and hasattr(self.train_sampler, "set_epoch")
+            ):
+                self.train_sampler.set_epoch(cur_epoch)
             for global_batch in self.train_data_loader:
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                 # settings from [profiler.sub_profiler_config] are reused
