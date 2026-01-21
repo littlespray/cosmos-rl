@@ -378,8 +378,8 @@ class Qwen3MoEBlock(nn.Module):
 
         """
         if self.enscale_enabled:
-            feat_1, feat_2 = kwargs["enscale_features"]
-            x = x + self.enscale(x, feat_1, feat_2)
+            enscale_embeddings = kwargs["enscale_features"]
+            x = x + self.enscale(x, enscale_embeddings)
 
         h = x + self.self_attn(
             self.input_layernorm(x),

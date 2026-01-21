@@ -996,25 +996,25 @@ class EnscaleConfig(BaseModel):
         default=False,
         description="Enable enscale cross-attention for Qwen3-VL LLM layers.",
     )
-    dim: Optional[int] = Field(
-        default=None,
-        description="Hidden size for enscale cross-attention. Defaults to model hidden size if None.",
+    enscale_model_name: str = Field(
+        default="facebook/dinov2-large",
+        description="Backbone (e.g., DINO/DINOv2) used to extract multi-level image features.",
     )
-    layers: List[int] = Field(
+    scale_idx: List[int] = Field(
+        default_factory=lambda: [6, 11],
+        description="Which hidden_states indices to extract from the enscale backbone.",
+    )
+    injected_layers_idx: List[int] = Field(
         default_factory=lambda: [0, -1],
         description="LLM layer indices to apply enscale (supports negative indices).",
-    )
-    dino_model_name: str = Field(
-        default="facebook/dinov3-vits16-pretrain-lvd1689m",
-        description="DINO model name for image feature extraction.",
-    )
-    dino_feature_layers: List[int] = Field(
-        default_factory=lambda: [6, 11],
-        description="Two DINO layer indices used for multi-level features.",
     )
     num_heads: int = Field(
         default=8,
         description="Number of attention heads for enscale cross-attention.",
+    )
+    ffn_multiplier: int = Field(
+        default=2,
+        description="FFN expansion ratio inside EnscaleHead.",
     )
 
 

@@ -409,10 +409,6 @@ def apply_tp_ep(
                 use_local_output=True,
             ),
         }
-        # NOTE: enscale module is intentionally NOT parallelized.
-        # When DTensor (Shard(1)) is passed to non-parallelized modules,
-        # PyTorch computes on local tensor and preserves the placement.
-        # This ensures enscale output has same seq_len as input x.
 
         if isinstance(transformer_block.mlp, MoE):
             parallelize_module(

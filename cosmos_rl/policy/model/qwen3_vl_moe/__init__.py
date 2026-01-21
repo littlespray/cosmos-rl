@@ -50,7 +50,7 @@ from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoeArgs,
     build_norm as qwen3_moe_build_norm,
 )
-from cosmos_rl.policy.model.enscale import EnscaleDinoEncoder, EnscaleHead
+from cosmos_rl.policy.model.enscale import EnscaleEncoder, EnscaleHead
 
 from cosmos_rl.policy.model.vision_encoder.qwen3_vl_moe import (
     Qwen3VLMoe_Encoder_Args,
@@ -159,13 +159,11 @@ class Qwen3MoE(nn.Module):
         self.enscale_encoder = None
         self.enscale_layers = set()
         if isinstance(enscale_cfg, dict) and enscale_cfg.get("enable", False):
-            enscale_dim = enscale_cfg.get("dim") or model_args.dim
-            dino_model_name = enscale_cfg.get(
-                "dino_model_name", "facebook/dinov3-vits16-pretrain-lvd1689m"
-            )
-            dino_feature_layers = enscale_cfg.get("dino_feature_layers", [6, 11])
-            num_heads = enscale_cfg.get("num_heads", 8)
-            layer_list = enscale_cfg.get("layers", [0, -1])
+            enscale_model_name = enscale_cfg.get("enscale_model_name")
+            scale_idx = enscale_cfg.get("scale_idx")
+            num_heads = enscale_cfg.get("num_heads")
+            ffn_multiplier = enscale_cfg.get("ffn_multiplier")
+            layer_list = enscale_cfg.get("injected_layers_idx")
             normalized_layers = []
             for idx in layer_list:
                 normalized = idx + model_args.n_layers if idx < 0 else idx
@@ -173,34 +171,31 @@ class Qwen3MoE(nn.Module):
                     normalized_layers.append(normalized)
             self.enscale_layers = set(normalized_layers)
             if len(self.enscale_layers) > 0:
-                self.enscale_encoder = EnscaleDinoEncoder(
-                    dino_model_name=dino_model_name, dino_feature_layers=dino_feature_layers
-                )
+                self.enscale_encoder = EnscaleEncoder(enscale_model_name, scale_idx)
                 logger.info(
-                    "Enscale enabled: dim=%s layers=%s dino=%s dino_layers=%s heads=%s",
-                    enscale_dim,
+                    f"Enscale enabled: layers=%s enscale_model=%s scale_idx=%s heads=%s ffn=%s",
                     sorted(self.enscale_layers),
-                    dino_model_name,
-                    dino_feature_layers,
+                    enscale_model_name,
+                    scale_idx,
                     num_heads,
+                    ffn_multiplier,
                 )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            head = None
+            enscale = None
             if self.enscale_encoder is not None and layer_id in self.enscale_layers:
-                dino_hidden_dim = self.enscale_encoder.dino.config.hidden_size
-                head = EnscaleHead(
+                enscale = EnscaleHead(
                     model_dim=model_args.dim,
-                    enscale_dim=enscale_dim,
-                    dino_hidden_dim=dino_hidden_dim,
+                    enscale_dim=self.enscale_encoder.hidden_size * len(scale_idx),
                     num_heads=num_heads,
+                    ffn_multiplier=ffn_multiplier,
                 )
             self.layers[str(layer_id)] = Qwen3MoEBlock(
                 layer_id,
                 model_args,
                 self.moe_args,
-                enscale_module=head,
+                enscale_module=enscale,
                 enscale_layers=self.enscale_layers,
             )
 
@@ -239,8 +234,8 @@ class Qwen3MoE(nn.Module):
 
         if self.enscale_encoder is not None and len(self.enscale_layers) > 0:
             images = kwargs["enscale_images"]
-            feat_1, feat_2 = self.enscale_encoder.extract(images)
-            kwargs["enscale_features"] = (feat_1, feat_2)
+            enscale_embeddings = self.enscale_encoder.extract(images)
+            kwargs["enscale_features"] = torch.cat(enscale_embeddings, dim=-1)
             del kwargs["enscale_images"]
 
         cp_mesh = kwargs.get("cp_mesh", None)
@@ -664,14 +659,12 @@ class Qwen3VLMoeModel(BaseModel):
             inputs_embeds = input_ids
         # For GRPO, we can pass in the logprob_masks to the model
         # to avoid computing the logits which are not needed for the model
-        enscale_images = kwargs.pop("enscale_images", None)
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids.permute(1, 0, 2).contiguous(),
             interested_tokens=kwargs.pop("interested_tokens", None),
             visual_pos_masks=visual_pos_masks,
             deepstack_visual_embeds=deepstack_visual_embeds,
-            enscale_images=enscale_images,
             **kwargs,  # Additional arguments for compatibility
         )
         return outputs
@@ -1091,8 +1084,6 @@ class Qwen3VLMoeModel(BaseModel):
         visual = [
             "visual",
         ]  # Filter Linear in visual out, they will corrupt the FP8/FP4 Linear.
-        # Exclude enscale modules: DINO encoder is frozen and enscale heads are small;
-        # quantizing them may hurt quality without meaningful speedup.
         enscale = [
             "enscale",
         ]
