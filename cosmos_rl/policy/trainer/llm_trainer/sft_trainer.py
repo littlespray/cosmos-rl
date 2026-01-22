@@ -397,49 +397,6 @@ class SFTTrainer(LLMTrainer):
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
 
-                # If enabled, report the current learnable enscale injection weight(s)
-                learnable_cfg = getattr(getattr(self.config.policy, "enscale", None),"learnable_inject_weight",None)
-                if learnable_cfg is not None:
-                    weights_by_layer = []
-                    llm = getattr(self.model, "model", None)
-                    layers = (getattr(llm, "layers", None) if llm is not None else None)
-                    if layers is not None:
-                        for layer_id, block in layers.items():
-                            enscale = getattr(block, "enscale", None)
-                            if enscale is None:
-                                continue
-                            w = getattr(enscale, "inject_weight", None)
-                            if w is None:
-                                continue
-                            w_local = w.to_local() if hasattr(w, "to_local") else w
-                            if hasattr(w_local, "detach") and w_local.numel() > 0:
-                                weights_by_layer.append((int(layer_id), float(w_local.detach().float().mean().item())))
-                    else:
-                        # Fallback for wrapped models (e.g., FSDP/DDP): scan parameters by name.
-                        # We try to extract layer id from "...layers.<id>....inject_weight".
-                        import re
-
-                        for name, p in self.model.named_parameters():
-                            if not name.endswith("inject_weight"):
-                                continue
-                            m = re.search(r"layers\.(\d+)\.", name)
-                            layer_id = int(m.group(1)) if m else -1
-                            p_local = p.to_local() if hasattr(p, "to_local") else p
-                            if hasattr(p_local, "detach") and p_local.numel() > 0:
-                                weights_by_layer.append(
-                                    (layer_id, float(p_local.detach().float().mean().item()))
-                                )
-
-                    weights_by_layer.sort(key=lambda x: x[0])
-                    if len(weights_by_layer) == 1:
-                        layer_id, w = weights_by_layer[0]
-                        report_data["train/enscale_weight"] = w
-                    elif len(weights_by_layer) > 1:
-                        (first_id, first_w) = weights_by_layer[0]
-                        (last_id, last_w) = weights_by_layer[-1]
-                        report_data["train/enscale_weight0"] = first_w
-                        report_data["train/enscale_weight1"] = last_w
-
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
                 if self.config.logging.report_mfu:

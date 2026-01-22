@@ -1,0 +1,30 @@
+{
+  "dataset": "HuggingFaceH4/llava-instruct-mix-vsft",
+  "subset": "",
+  "split": "train",
+  "streaming": false,
+  "max_samples": 0,
+  "processed": 259155,
+  "failed": 0,
+  "model_name_or_path": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "model_max_length_in_config": 16384,
+  "over_max_length_count": 2,
+  "over_max_length_rate": 7.717389207231193e-06,
+  "seq_len_percentiles": {
+    "50.0": 308,
+    "90.0": 665,
+    "95.0": 778,
+    "99.0": 1052,
+    "100.0": 16702
+  },
+  "vision_pad_token_percentiles": {
+    "50.0": 0,
+    "90.0": 0,
+    "95.0": 0,
+    "99.0": 0,
+    "100.0": 0
+  },
+  "recommend_mode": "p99",
+  "recommend_max_context": 1280,
+  "round_to": 256
+}
