@@ -397,6 +397,36 @@ class SFTTrainer(LLMTrainer):
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
 
+                # If enabled, report the current learnable enscale injection weight(s)
+                try:
+                    learnable_cfg = getattr(
+                        getattr(self.config.policy, "enscale", None),
+                        "learnable_inject_weight",
+                        None,
+                    )
+                    if learnable_cfg is not None:
+                        weights = []
+                        for m in self.model.modules():
+                            w = getattr(m, "inject_weight", None)
+                            if w is None:
+                                continue
+                            # Handle DTensor-like params without importing DTensor
+                            if hasattr(w, "to_local"):
+                                w_local = w.to_local()
+                            else:
+                                w_local = w
+                            if hasattr(w_local, "detach") and w_local.numel() > 0:
+                                weights.append(float(w_local.detach().float().mean().item()))
+                        if len(weights) == 1:
+                            report_data["train/enscale_inject_weight"] = weights[0]
+                        elif len(weights) > 1:
+                            report_data["train/enscale_inject_weight_mean"] = sum(weights) / len(weights)
+                            report_data["train/enscale_inject_weight_min"] = min(weights)
+                            report_data["train/enscale_inject_weight_max"] = max(weights)
+                except Exception:
+                    # best-effort logging only
+                    pass
+
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
                 if self.config.logging.report_mfu:

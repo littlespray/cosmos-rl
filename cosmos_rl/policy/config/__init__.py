@@ -1016,6 +1016,13 @@ class EnscaleConfig(BaseModel):
         default=2,
         description="FFN expansion ratio inside EnscaleHead.",
     )
+    learnable_inject_weight: Optional[float] = Field(
+        default=None,
+        description=(
+            "If set, enable a learnable scalar to scale enscale injection output "
+            "before adding to hidden_states. If None, enscale output is added directly."
+        ),
+    )
 
 
 class PolicyConfig(BaseModel):

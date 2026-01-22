@@ -163,6 +163,7 @@ class Qwen3MoE(nn.Module):
             scale_idx = enscale_cfg.get("scale_idx")
             num_heads = enscale_cfg.get("num_heads")
             ffn_multiplier = enscale_cfg.get("ffn_multiplier")
+            learnable_inject_weight = enscale_cfg.get("learnable_inject_weight", None)
             layer_list = enscale_cfg.get("injected_layers_idx")
             normalized_layers = []
             for idx in layer_list:
@@ -173,12 +174,13 @@ class Qwen3MoE(nn.Module):
             if len(self.enscale_layers) > 0:
                 self.enscale_encoder = EnscaleEncoder(enscale_model_name, scale_idx)
                 logger.info(
-                    f"Enscale enabled: layers=%s enscale_model=%s scale_idx=%s heads=%s ffn=%s",
+                    f"Enscale enabled: layers=%s enscale_model=%s scale_idx=%s heads=%s ffn=%s learnable_inject_weight=%s",
                     sorted(self.enscale_layers),
                     enscale_model_name,
                     scale_idx,
                     num_heads,
                     ffn_multiplier,
+                    learnable_inject_weight,
                 )
 
         self.layers = torch.nn.ModuleDict()
@@ -190,6 +192,7 @@ class Qwen3MoE(nn.Module):
                     enscale_dim=self.enscale_encoder.hidden_size * len(scale_idx),
                     num_heads=num_heads,
                     ffn_multiplier=ffn_multiplier,
+                    learnable_inject_weight=learnable_inject_weight,
                 )
             self.layers[str(layer_id)] = Qwen3MoEBlock(
                 layer_id,

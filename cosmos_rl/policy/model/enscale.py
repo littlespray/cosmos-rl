@@ -64,6 +64,7 @@ class EnscaleHead(nn.Module):
         enscale_dim: int,
         num_heads: int,
         ffn_multiplier: int,
+        learnable_inject_weight: float | None = None,
     ) -> None:
         super().__init__()
         self.q_norm = nn.RMSNorm(model_dim)
@@ -82,7 +83,13 @@ class EnscaleHead(nn.Module):
             nn.GELU(),
             nn.Linear(model_dim * ffn_multiplier, model_dim),
         )
-        self.gate = nn.Parameter(torch.zeros(1))
+        self.inject_weight: nn.Parameter | None
+        if learnable_inject_weight is None:
+            self.inject_weight = None
+        else:
+            self.inject_weight = nn.Parameter(
+                torch.tensor([float(learnable_inject_weight)])
+            )
 
     def forward(
         self, hidden_states: torch.Tensor, scale_embeddings: torch.Tensor
@@ -109,6 +116,8 @@ class EnscaleHead(nn.Module):
 
         attn_out = self.attn_func(xq, xk, xv, causal=False).reshape(b, qlen, -1).to(input_dtype)
         attn_out = self.o_proj(attn_out)
-        out = self.gate * self.ffn(attn_out)
+        out = self.ffn(attn_out)
+        if self.inject_weight is not None:
+            out = out * self.inject_weight.to(device=out.device, dtype=out.dtype)
 
         return out
