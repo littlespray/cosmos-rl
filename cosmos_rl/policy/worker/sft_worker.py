@@ -629,9 +629,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
+        stop_training = False
         # For pre-train validation
         val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
+            if stop_training:
+                break
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             if (
                 self.config.train.train_policy.dataloader_shuffle
@@ -693,7 +696,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     self.config.train.max_num_steps is not None
                     and self.train_step >= self.total_steps
                 ):
-                    break  # break outer epoch loop
+                    stop_training = True
+                    break  # break dataloader loop; epoch loop will stop via stop_training
 
                 val_avg_loss = self.validate(
                     current_epoch=cur_epoch, is_last_step=False
@@ -710,6 +714,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
                 self.profiler.step()
 
+            if stop_training:
+                break
             cur_epoch += 1
 
         # Finally: validation and save checkpoint

@@ -531,6 +531,7 @@ class SFTTrainer(LLMTrainer):
                     ),
                     trainable_only=False,
                     dtype=util.str2torch_dtype(self.config.train.param_dtype),
+                    is_final=is_last_step,
                 )
             # save checkpoint
             if self.config.train.ckpt.enable_checkpoint:
