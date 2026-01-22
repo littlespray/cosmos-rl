@@ -165,6 +165,8 @@ class Qwen3MoE(nn.Module):
             ffn_multiplier = enscale_cfg.get("ffn_multiplier")
             learnable_inject_weight = enscale_cfg.get("learnable_inject_weight", None)
             layer_list = enscale_cfg.get("injected_layers_idx")
+            if layer_list == "all":
+                layer_list = list(range(model_args.n_layers))
             normalized_layers = []
             for idx in layer_list:
                 normalized = idx + model_args.n_layers if idx < 0 else idx

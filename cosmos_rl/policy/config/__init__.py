@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from pydantic import BaseModel, Field, model_validator
+from typing import Literal
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
 from datetime import datetime
@@ -1004,9 +1005,12 @@ class EnscaleConfig(BaseModel):
         default_factory=lambda: [6, 11],
         description="Which hidden_states indices to extract from the enscale backbone.",
     )
-    injected_layers_idx: List[int] = Field(
+    injected_layers_idx: List[int] | Literal["all"] = Field(
         default_factory=lambda: [0, -1],
-        description="LLM layer indices to apply enscale (supports negative indices).",
+        description=(
+            "LLM layer indices to apply enscale (supports negative indices), "
+            "or 'all' to apply to every LLM layer."
+        ),
     )
     num_heads: int = Field(
         default=8,
