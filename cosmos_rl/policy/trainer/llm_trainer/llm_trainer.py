@@ -64,6 +64,8 @@ class LLMTrainer(Trainer):
             **kwargs,
         )
 
+        self.upload_thread = None
+
         if config.train.seed:
             torch.manual_seed(config.train.seed)
             torch.cuda.manual_seed(config.train.seed)

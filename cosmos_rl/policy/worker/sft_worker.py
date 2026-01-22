@@ -680,8 +680,29 @@ class SFTPolicyWorker(PolicyWorkerBase):
                             step=self.train_step,
                         )
                     if "console" in self.config.logging.logger:
+                        w = report_data.get("train/enscale_weight")
+                        w0 = report_data.get("train/enscale_weight0")
+                        w1 = report_data.get("train/enscale_weight1")
+                        enscale_suffix = (
+                            f", Enscale weight: {w:.6f}"
+                            if w is not None
+                            else (
+                                ", Enscale weights: "
+                                + ", ".join(
+                                    [s for s in [(f"w0={w0:.6f}" if w0 is not None else None), (f"w1={w1:.6f}" if w1 is not None else None)] if s]
+                                )
+                                if (w0 is not None or w1 is not None)
+                                else ""
+                            )
+                        )
+
                         logger.info(
-                            f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                            f"Step: {self.train_step}/{self.total_steps}, "
+                            f"Loss: {report_data['train/loss_avg']:.5f}, "
+                            f"Grad norm: {report_data['train/grad_norm']:.5f}, "
+                            f"Learning rate: {report_data['train/learning_rate']:.5e}, "
+                            f"Iteration time: {report_data['train/iteration_time']:.2f}s"
+                            f"{enscale_suffix}."
                         )
 
                     for custom_logger_fn in self.custom_logger_fns:

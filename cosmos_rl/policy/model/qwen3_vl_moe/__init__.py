@@ -343,6 +343,16 @@ class Qwen3MoE(nn.Module):
         self.rotary_emb.to(current_device)
         self.rotary_emb.reset_inv_freq()
 
+        # Re-initialize enscale inject_weight (lost during meta-device init)
+        enscale_cfg = getattr(cosmos_config.policy, "enscale", None)
+        init_weight = getattr(enscale_cfg, "learnable_inject_weight", None) if enscale_cfg else None
+        if init_weight is not None:
+            for layer in self.layers.values():
+                enscale = getattr(layer, "enscale", None)
+                if enscale is not None and getattr(enscale, "inject_weight", None) is not None:
+                    with torch.no_grad():
+                        enscale.inject_weight.fill_(float(init_weight))
+
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
         nparams = sum(p.numel() for p in self.parameters())
