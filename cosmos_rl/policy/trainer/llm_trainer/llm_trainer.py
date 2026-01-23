@@ -551,9 +551,11 @@ class LLMTrainer(Trainer):
                     target=upload_handler,
                     args=(self.config, is_final, path, rel_path),
                     name="upload_safetensors",
-                    daemon=True,
+                    daemon=False,
                 )
                 self.upload_thread.start()
+                if is_final:
+                    self.upload_thread.join()
 
     def model_load_from_hf(self):
         start_time = time.time()
