@@ -42,11 +42,206 @@ except ImportError:
 
 try:
     from torch.optim import Muon
-except Exception:
+except ImportError:
     Muon = None
 
 T = TypeVar("T", bound=Optimizer)
 
+def _filter_optimizer_kwargs(
+    optimizer_cls: type[Optimizer], optimizer_kwargs: dict[str, Any]
+) -> dict[str, Any]:
+    init_signature = inspect.signature(optimizer_cls.__init__)
+    parameters = init_signature.parameters
+    kwarg_names = [
+        name for name, param in parameters.items()
+        if param.default != inspect.Parameter.empty
+    ]
+    filtered_optimizer_kwargs = {
+        k: v for k, v in optimizer_kwargs.items() if k in kwarg_names
+    }
+    unused_kwargs = set(optimizer_kwargs.keys()) - set(kwarg_names)
+    if unused_kwargs:
+        logger.warning(f"Unused kwargs in optimizer-{optimizer_cls.__name__}: {unused_kwargs}")
+    return filtered_optimizer_kwargs
+
+class MuonWithAdam(Optimizer):
+    """Muon for 2D parameters with AdamW fallback for non-2D parameters.
+
+    Note: the reference MuonWithAuxAdam implementation typically uses different learning rates
+    for Muon params vs AdamW params via separate param groups. This wrapper supports that via
+    `lr_muon` and `lr_adamw` (both default to `lr`).
+    """
+
+    def __init__(
+        self,
+        params,
+        lr=1e-3,
+        lr_muon: float | None = None,
+        lr_adamw: float | None = None,
+        betas=(0.9, 0.999),
+        weight_decay=0.0,
+        momentum=0.95,
+        nesterov: bool = True,
+        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
+        eps: float = 1e-7,
+        ns_steps: int = 5,
+        adjust_lr_fn="original",
+        fused=False,
+        foreach=False,
+    ) -> None:
+        if Muon is None:
+            raise NotImplementedError("Muon optimizer not installed.")
+        all_params = list(params)
+        lr_muon = lr if lr_muon is None else lr_muon
+        lr_adamw = lr if lr_adamw is None else lr_adamw
+        # Store all relevant hyperparameters in the wrapper so checkpointing can
+        # restore them consistently.
+        super().__init__(
+            all_params,
+            {
+                "lr": lr,
+                "lr_muon": lr_muon,
+                "lr_adamw": lr_adamw,
+                "betas": betas,
+                "weight_decay": weight_decay,
+                "momentum": momentum,
+                "nesterov": nesterov,
+                "ns_coefficients": ns_coefficients,
+                "eps": eps,
+                "ns_steps": ns_steps,
+                "adjust_lr_fn": adjust_lr_fn,
+                "fused": fused,
+                "foreach": foreach,
+            },
+        )
+
+        muon_params = [p for p in all_params if p.ndim == 2]
+        adam_params = [p for p in all_params if p.ndim != 2]
+        self._muon = None
+        self._adam = None
+
+        if muon_params:
+            muon_kwargs = _filter_optimizer_kwargs(
+                Muon,
+                {
+                    "lr": lr_muon,
+                    "momentum": momentum,
+                    "weight_decay": weight_decay,
+                    "nesterov": nesterov,
+                    "ns_coefficients": ns_coefficients,
+                    "eps": eps,
+                    "ns_steps": ns_steps,
+                    "adjust_lr_fn": adjust_lr_fn,
+                },
+            )
+            self._muon = Muon(muon_params, **muon_kwargs)
+        if adam_params:
+            adam_kwargs = _filter_optimizer_kwargs(
+                torch.optim.AdamW,
+                {
+                    "lr": lr_adamw,
+                    "betas": betas,
+                    "weight_decay": weight_decay,
+                    "fused": fused,
+                    "foreach": foreach,
+                },
+            )
+            self._adam = torch.optim.AdamW(adam_params, **adam_kwargs)
+
+        logger.info(f"Muon param tensors: {len(muon_params)}, AdamW param tensors: {len(adam_params)}")
+
+    def step(self, closure=None):
+        loss = None
+        # For PyTorch API
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        if self._muon is not None:
+            self._muon.step()
+        if self._adam is not None:
+            self._adam.step()
+        return loss
+
+    def zero_grad(self, *args, **kwargs):
+        if self._muon is not None:
+            self._muon.zero_grad(*args, **kwargs)
+        if self._adam is not None:
+            self._adam.zero_grad(*args, **kwargs)
+
+    def state_dict(self):
+        # Must follow PyTorch optimizer state_dict structure:
+        # {"state": {pid -> state}, "param_groups": [{"params": [pid, ...], ...}]}
+        # where pid numbering follows this optimizer's param_groups ordering.
+        wrapper_osd = super().state_dict()
+
+        # Map Parameter -> wrapper pid
+        wrapper_params: list[nn.Parameter] = list(
+            itertools.chain.from_iterable(g["params"] for g in self.param_groups)
+        )
+        wrapper_pid_by_param = {p: i for i, p in enumerate(wrapper_params)}
+
+        merged_state: dict[int, Any] = {}
+
+        if self._muon is not None:
+            for p, st in self._muon.state.items():
+                pid = wrapper_pid_by_param.get(p)
+                if pid is not None:
+                    merged_state[pid] = st
+
+        if self._adam is not None:
+            for p, st in self._adam.state.items():
+                pid = wrapper_pid_by_param.get(p)
+                if pid is not None:
+                    merged_state[pid] = st
+
+        wrapper_osd["state"] = merged_state
+        return wrapper_osd
+
+    def load_state_dict(self, state_dict):
+        # Load wrapper structure first (restores param_groups + wrapper state mapping)
+        super().load_state_dict(state_dict)
+
+        # Propagate hyperparameters from wrapper group(s) to sub-optimizers (best effort).
+        # Muon/Adam may have different accepted keys; update only existing ones.
+        for wrapper_group in self.param_groups:
+            if self._muon is not None:
+                for g in self._muon.param_groups:
+                    for k, v in wrapper_group.items():
+                        if k in g and k != "params":
+                            g[k] = v
+                    # Support separate learning rate for Muon
+                    if "lr_muon" in wrapper_group:
+                        g["lr"] = wrapper_group["lr_muon"]
+            if self._adam is not None:
+                for g in self._adam.param_groups:
+                    for k, v in wrapper_group.items():
+                        if k in g and k != "params":
+                            g[k] = v
+                    # Support separate learning rate for AdamW
+                    if "lr_adamw" in wrapper_group:
+                        g["lr"] = wrapper_group["lr_adamw"]
+
+        # Now split wrapper state to each sub-optimizer by Parameter identity.
+        def _load_sub_state(sub_opt: Optimizer) -> None:
+            sub_osd = sub_opt.state_dict()
+            sub_params: list[nn.Parameter] = list(
+                itertools.chain.from_iterable(g["params"] for g in sub_opt.param_groups)
+            )
+            sub_pid_by_param = {p: i for i, p in enumerate(sub_params)}
+
+            sub_state: dict[int, Any] = {}
+            for p, st in self.state.items():
+                sub_pid = sub_pid_by_param.get(p)
+                if sub_pid is not None:
+                    sub_state[sub_pid] = st
+
+            sub_osd["state"] = sub_state
+            sub_opt.load_state_dict(sub_osd)
+
+        if self._muon is not None:
+            _load_sub_state(self._muon)
+        if self._adam is not None:
+            _load_sub_state(self._adam)
 
 class OptimizersContainer(Optimizer, Generic[T]):
     """A container for multiple optimizers.
@@ -184,174 +379,6 @@ class OptimizersContainer(Optimizer, Generic[T]):
             )
 
 
-def _filter_optimizer_kwargs(
-    optimizer_cls: type[Optimizer], optimizer_kwargs: dict[str, Any]
-) -> dict[str, Any]:
-    init_signature = inspect.signature(optimizer_cls.__init__)
-    parameters = init_signature.parameters
-    kwarg_names = [
-        name for name, param in parameters.items()
-        if param.default != inspect.Parameter.empty
-    ]
-    filtered_optimizer_kwargs = {
-        k: v for k, v in optimizer_kwargs.items() if k in kwarg_names
-    }
-    unused_kwargs = set(optimizer_kwargs.keys()) - set(kwarg_names)
-    if unused_kwargs:
-        logger.warning(f"Unused kwargs in optimizer-{optimizer_cls.__name__}: {unused_kwargs}")
-    return filtered_optimizer_kwargs
-
-class MuonWithAdam(Optimizer):
-    """Muon for 2D parameters with Adam fallback for non-2D parameters."""
-
-    def __init__(
-        self,
-        params,
-        lr=1e-3,
-        betas=(0.9, 0.999),
-        weight_decay=0.0,
-        momentum=0.95,
-        adjust_lr_fn="match_rms_adamw",
-        fused=False,
-        foreach=False,
-    ) -> None:
-        if Muon is None:
-            raise NotImplementedError("Muon optimizer not installed.")
-        all_params = list(params)
-        # Store all relevant hyperparameters in the wrapper so checkpointing can
-        # restore them consistently.
-        super().__init__(
-            all_params,
-            {
-                "lr": lr,
-                "betas": betas,
-                "weight_decay": weight_decay,
-                "momentum": momentum,
-                "adjust_lr_fn": adjust_lr_fn,
-                "fused": fused,
-                "foreach": foreach,
-            },
-        )
-
-        muon_params = [p for p in all_params if p.ndim == 2]
-        adam_params = [p for p in all_params if p.ndim != 2]
-        self._muon = None
-        self._adam = None
-
-        if muon_params:
-            muon_kwargs = _filter_optimizer_kwargs(
-                Muon,
-                {
-                    "lr": lr,
-                    "momentum": momentum,
-                    "weight_decay": weight_decay,
-                    "adjust_lr_fn": adjust_lr_fn,
-                },
-            )
-            self._muon = Muon(muon_params, **muon_kwargs)
-        if adam_params:
-            adam_kwargs = _filter_optimizer_kwargs(
-                torch.optim.Adam,
-                {
-                    "lr": lr,
-                    "betas": betas,
-                    "weight_decay": weight_decay,
-                    "fused": fused,
-                    "foreach": foreach,
-                },
-            )
-            self._adam = torch.optim.Adam(adam_params, **adam_kwargs)
-
-        logger.info(f"Muon param tensors: {len(muon_params)}, Adam param tensors: {len(adam_params)}")
-
-    def step(self, closure=None):
-        loss = None
-        # For PyTorch API
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-        if self._muon is not None:
-            self._muon.step()
-        if self._adam is not None:
-            self._adam.step()
-        return loss
-
-    def zero_grad(self, *args, **kwargs):
-        if self._muon is not None:
-            self._muon.zero_grad(*args, **kwargs)
-        if self._adam is not None:
-            self._adam.zero_grad(*args, **kwargs)
-
-    def state_dict(self):
-        # Must follow PyTorch optimizer state_dict structure:
-        # {"state": {pid -> state}, "param_groups": [{"params": [pid, ...], ...}]}
-        # where pid numbering follows this optimizer's param_groups ordering.
-        wrapper_osd = super().state_dict()
-
-        # Map Parameter -> wrapper pid
-        wrapper_params: list[nn.Parameter] = list(
-            itertools.chain.from_iterable(g["params"] for g in self.param_groups)
-        )
-        wrapper_pid_by_param = {p: i for i, p in enumerate(wrapper_params)}
-
-        merged_state: dict[int, Any] = {}
-
-        if self._muon is not None:
-            for p, st in self._muon.state.items():
-                pid = wrapper_pid_by_param.get(p)
-                if pid is not None:
-                    merged_state[pid] = st
-
-        if self._adam is not None:
-            for p, st in self._adam.state.items():
-                pid = wrapper_pid_by_param.get(p)
-                if pid is not None:
-                    merged_state[pid] = st
-
-        wrapper_osd["state"] = merged_state
-        return wrapper_osd
-
-    def load_state_dict(self, state_dict):
-        # Load wrapper structure first (restores param_groups + wrapper state mapping)
-        super().load_state_dict(state_dict)
-
-        # Propagate hyperparameters from wrapper group(s) to sub-optimizers (best effort).
-        # Muon/Adam may have different accepted keys; update only existing ones.
-        for wrapper_group in self.param_groups:
-            if self._muon is not None:
-                for g in self._muon.param_groups:
-                    for k, v in wrapper_group.items():
-                        if k in g and k != "params":
-                            g[k] = v
-            if self._adam is not None:
-                for g in self._adam.param_groups:
-                    for k, v in wrapper_group.items():
-                        if k in g and k != "params":
-                            g[k] = v
-
-        # Now split wrapper state to each sub-optimizer by Parameter identity.
-        def _load_sub_state(sub_opt: Optimizer) -> None:
-            sub_osd = sub_opt.state_dict()
-            sub_params: list[nn.Parameter] = list(
-                itertools.chain.from_iterable(g["params"] for g in sub_opt.param_groups)
-            )
-            sub_pid_by_param = {p: i for i, p in enumerate(sub_params)}
-
-            sub_state: dict[int, Any] = {}
-            for p, st in self.state.items():
-                sub_pid = sub_pid_by_param.get(p)
-                if sub_pid is not None:
-                    sub_state[sub_pid] = st
-
-            sub_osd["state"] = sub_state
-            sub_opt.load_state_dict(sub_osd)
-
-        if self._muon is not None:
-            _load_sub_state(self._muon)
-        if self._adam is not None:
-            _load_sub_state(self._adam)
-
-
 def build_optimizers(
     model_parts: List[nn.Module],
     config: CosmosConfig,
@@ -404,6 +431,7 @@ def build_optimizers(
             "lr": lr_i,
             "betas": config.train.optm_betas,
             "weight_decay": config.train.optm_weight_decay,
+            "eps": config.train.epsilon,
             "fused": fused_i,
             "foreach": foreach_i,
         }
@@ -425,10 +453,12 @@ def build_optimizers(
         raise NotImplementedError(f"Optimizer {name} not installed.")
 
     optimizer_cls = optimizer_classes[name]
+
     filtered_optimizer_kwargs = [
         _filter_optimizer_kwargs(optimizer_cls, optimizer_kwargs_i)
         for optimizer_kwargs_i in optimizer_kwargs
     ]
+
     return OptimizersContainer(optimizer_cls, model_parts, filtered_optimizer_kwargs)
 
 
