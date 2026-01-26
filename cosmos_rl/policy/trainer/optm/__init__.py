@@ -21,6 +21,8 @@ import itertools
 import copy
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+import torch.optim._muon as torch_muon
 from torch.optim.optimizer import Optimizer
 from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.distributed.checkpoint.stateful import Stateful
@@ -67,9 +69,8 @@ def _filter_optimizer_kwargs(
 class MuonWithAdam(Optimizer):
     """Muon for 2D parameters with AdamW fallback for non-2D parameters.
 
-    Note: the reference MuonWithAuxAdam implementation typically uses different learning rates
-    for Muon params vs AdamW params via separate param groups. This wrapper supports that via
-    `lr_muon` and `lr_adamw` (both default to `lr`).
+    TP support: if a 2D param has `device_mesh` (with "tp" dim) and `tp_shard_dim`, Muon will
+    all-gather the full update, orthogonalize, then scatter back. Auto-detected, no switches.
     """
 
     def __init__(
@@ -94,8 +95,6 @@ class MuonWithAdam(Optimizer):
         all_params = list(params)
         lr_muon = lr if lr_muon is None else lr_muon
         lr_adamw = lr if lr_adamw is None else lr_adamw
-        # Store all relevant hyperparameters in the wrapper so checkpointing can
-        # restore them consistently.
         super().__init__(
             all_params,
             {
@@ -150,6 +149,7 @@ class MuonWithAdam(Optimizer):
 
         logger.info(f"Muon param tensors: {len(muon_params)}, AdamW param tensors: {len(adam_params)}")
 
+    @torch.no_grad()
     def step(self, closure=None):
         loss = None
         # For PyTorch API
@@ -157,10 +157,87 @@ class MuonWithAdam(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         if self._muon is not None:
-            self._muon.step()
+            self._step_muon_with_tp()
         if self._adam is not None:
             self._adam.step()
         return loss
+
+    def _step_muon_with_tp(self) -> None:
+        """Muon step. If a 2D param has (device_mesh + tp_shard_dim), do TP-equivalent update."""
+        if not (dist.is_available() and dist.is_initialized()):
+            self._muon.step()
+            return
+
+        tp: dict[nn.Parameter, tuple[object, int]] = {}
+        for group in self._muon.param_groups:
+            for p in group["params"]:
+                shard_dim = getattr(p, "tp_shard_dim", None)
+                mesh = getattr(p, "device_mesh", None)
+                if shard_dim is None or mesh is None:
+                    continue
+                try:
+                    g = mesh.get_group("tp")
+                except Exception:
+                    continue
+                if dist.get_world_size(g) > 1:
+                    tp[p] = (g, int(shard_dim))
+
+        if not tp:
+            self._muon.step()
+            return
+
+        for group in self._muon.param_groups:  # Muon only owns 2D params
+            lr = group["lr"]
+            wd = group["weight_decay"]
+            mom = group["momentum"]
+            nesterov = group["nesterov"]
+            ns_coeffs = group["ns_coefficients"]
+            ns_steps = group["ns_steps"]
+            eps = group["eps"]
+            adjust_lr_fn = group["adjust_lr_fn"]
+
+            for p in group["params"]:
+                grad = p.grad
+                if grad is None:
+                    continue
+
+                state = self._muon.state[p]
+                buf = state.get("momentum_buffer")
+                if buf is None:
+                    buf = state["momentum_buffer"] = torch.zeros_like(p)
+                buf.lerp_(grad, 1 - mom)
+                pre = grad.lerp(buf, mom) if nesterov else buf
+                pre_bf16 = pre.to(torch.bfloat16)
+
+                if tp.get(p) is None:
+                    update = torch_muon._zeropower_via_newtonschulz(pre_bf16, ns_coeffs, ns_steps, eps)
+                    p.mul_(1 - lr * wd).add_(update, alpha=-torch_muon._adjust_lr(lr, adjust_lr_fn, p.shape))
+                    continue
+
+                tp_group, shard_dim = tp.get(p)
+                ws = dist.get_world_size(tp_group)
+                rank = dist.get_rank(tp_group)
+                m, n = pre_bf16.shape
+                local = pre_bf16.reshape(-1)
+                gathered = torch.empty((ws * local.numel(),), device=local.device, dtype=local.dtype)
+                dist.all_gather_into_tensor(gathered, local, group=tp_group)
+                shards = gathered.view(ws, m, n)
+                sd = int(shard_dim)
+                if sd not in (0, 1):
+                    raise ValueError(f"Unsupported tp_shard_dim: {shard_dim}")
+                full = (
+                    shards.reshape(ws * m, n)
+                    if sd == 0
+                    else shards.transpose(0, 1).reshape(m, ws * n)
+                )
+                start = rank * (m if sd == 0 else n)
+                length = m if sd == 0 else n
+
+                full = torch_muon._zeropower_via_newtonschulz(full, ns_coeffs, ns_steps, eps)
+                p.mul_(1 - lr * wd).add_(
+                    full.narrow(sd, start, length),
+                    alpha=-torch_muon._adjust_lr(lr, adjust_lr_fn, full.shape),
+                )
 
     def zero_grad(self, *args, **kwargs):
         if self._muon is not None:
