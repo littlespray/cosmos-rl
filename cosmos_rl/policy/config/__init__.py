@@ -624,7 +624,7 @@ class TrainingConfig(BaseModel):
     optm_name: str = Field(
         default="AdamW",
         description="Optimizer name",
-        choices=["AdamW", "Adam", "Muon"],
+        choices=["AdamW", "Adam"],
     )
     optm_lr: Union[float, List[float]] = Field(
         default=1e-6,
