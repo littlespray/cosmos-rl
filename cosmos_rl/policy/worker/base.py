@@ -115,11 +115,14 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
             traceback.print_exc()
             raise e
         finally:
-            # Ensure any async checkpoint uploads are flushed before exit.
-            ckpt_manager = getattr(self.trainer, "ckpt_manager", None)
-            if ckpt_manager is not None and hasattr(ckpt_manager, "finalize"):
-                try:
-                    ckpt_manager.finalize()
-                except Exception as e:
-                    logger.error(f"Failed to finalize checkpoint manager: {e}")
+            # Ensure any async uploads are flushed before exit.
+            try:
+                if hasattr(self.trainer, "finalize"):
+                    self.trainer.finalize()
+                else:
+                    ckpt_manager = getattr(self.trainer, "ckpt_manager", None)
+                    if ckpt_manager is not None and hasattr(ckpt_manager, "finalize"):
+                        ckpt_manager.finalize()
+            except Exception as e:
+                logger.error(f"Failed to finalize trainer: {e}")
             self.destroy_worker()

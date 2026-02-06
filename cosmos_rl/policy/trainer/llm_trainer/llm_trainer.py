@@ -167,6 +167,27 @@ class LLMTrainer(Trainer):
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
         )
 
+    def finalize(self) -> None:
+        """Flush any async work before process exit.
+
+        - waits for safetensors upload thread (HF/S3) if running
+        - waits for async checkpoint saves/uploads if enabled
+        """
+        # 1) Wait for any outstanding safetensors upload.
+        try:
+            if self.upload_thread is not None and self.upload_thread.is_alive():
+                logger.info("[Policy] Waiting for upload thread to finish...")
+                self.upload_thread.join()
+        except Exception as e:
+            logger.error(f"[Policy] Failed to join upload thread: {e}")
+
+        # 2) Flush async checkpointing.
+        try:
+            if hasattr(self, "ckpt_manager") and hasattr(self.ckpt_manager, "finalize"):
+                self.ckpt_manager.finalize()
+        except Exception as e:
+            logger.error(f"[Policy] Failed to finalize checkpoint manager: {e}")
+
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(self.model_parts, self.config)
